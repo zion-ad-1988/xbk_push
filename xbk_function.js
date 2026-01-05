@@ -76,7 +76,7 @@ const zhanxianneirong = '';
 const pingbineirongplus = '';
 
 //全部楼主屏蔽
-const pingbilouzhu = '';
+const pingbilouzhu = '好单发报员|我是白菜菌|就是吃阿|白菜|辛德瑞拉小卖部|省钱安利社|猫超白给王翠花|妖娆本娆|拼夕夕零食bot|拼夕夕水果bot|拼夕夕好物bot';
 //全部楼主强制展现
 const zhanxianlouzhu = '';
 //全部楼主强制屏蔽(强化)
@@ -86,6 +86,64 @@ const pingbilouzhuplus = '';
 const pingbitime = "5";
 
 
+// 在用户配置区域结束后的代码中添加以下内容
+// 定义日志文件路径
+const logFilePath = path.join(DATA_DIR, 'xbk.log');
+
+// 读取日志文件中的id列表
+function readLogIds() {
+    try {
+        if (!fs.existsSync(logFilePath)) {
+            return [];
+        }
+        const data = fs.readFileSync(logFilePath, 'utf8');
+        // 解析每行数据，提取id
+        const lines = data.trim().split('\n').filter(line => line.trim() !== '');
+        const ids = lines.map(line => {
+            try {
+                const entry = JSON.parse(line);
+                return entry.id;
+            } catch (e) {
+                return null;
+            }
+        }).filter(id => id !== null);
+        return ids;
+    } catch (error) {
+        console.error('读取日志文件出错:', error);
+        return [];
+    }
+}
+
+// 保存id到日志文件
+function saveIdToLog(item) {
+    try {
+        const timestamp = new Date().toISOString();
+        const logEntry = JSON.stringify({ id: item.id, timestamp });
+
+        // 读取现有日志
+        let logs = [];
+        if (fs.existsSync(logFilePath)) {
+            const data = fs.readFileSync(logFilePath, 'utf8');
+            logs = data.trim().split('\n').filter(line => line.trim() !== '');
+        }
+
+        // 添加新日志
+        logs.push(logEntry);
+
+        // 只保留最新的100条
+        if (logs.length > 100) {
+            logs = logs.slice(-100);
+        }
+
+        // 写入文件
+        fs.writeFileSync(logFilePath, logs.join('\n') + '\n', 'utf8');
+        return true;
+    } catch (error) {
+        console.error('保存日志出错:', error);
+        return false;
+    }
+}
+
 console.debug('开始获取线报酷数据...');
 got(newUrl, {
     timeout: { request: 10000 },  // ✅ 必须使用对象格式
@@ -94,24 +152,36 @@ got(newUrl, {
         methods: ['GET']
     }
 })
-    .json()  // 自动解析JSON响应
-    .then((xbkdata) => {
-        let items = [];
-        xbkdata.forEach(item => {
-            //这里判断之前有没有获取过本文章
-            if (!isMessageInFile(item, getFileName(newUrl))) {
-                appendMessageToFile(item, getFileName(newUrl));
-                //进行全部屏蔽判断
-                if (listfilter(item, pingbifenlei, pingbilouzhu, zhanxianlouzhu, pingbilouzhuplus, pingbibiaoti, zhanxianbiaoti, pingbibiaotiplus, pingbineirong, zhanxianneirong, pingbineirongplus, pingbitime)) {
-                    items.push(item);
-                } else {
-                    //console.log("-----------------------------");
-                    //console.log("数据因你的设置被全局屏蔽："+item.title+"【"+item.catename+"】"+domin+item.url);
-                }
+.json()  // 自动解析JSON响应
+.then((xbkdata) => {
+    // 读取已记录的id列表
+    const loggedIds = readLogIds();
+    let items = [];
+
+    xbkdata.forEach(item => {
+        // 检查id是否已存在于日志中
+        if (loggedIds.includes(item.id)) {
+            console.log(`ID ${item.id} 已存在，跳过推送`);
+            return; // 跳过已处理的id
+        }
+
+        // 检查是否已经通过文件系统记录过（双重保险）
+        if (!isMessageInFile(item, getFileName(newUrl))) {
+            appendMessageToFile(item, getFileName(newUrl));
+
+            // 进行全部屏蔽判断
+            if (listfilter(item, pingbifenlei, pingbilouzhu, zhanxianlouzhu, pingbilouzhuplus, pingbibiaoti, zhanxianbiaoti, pingbibiaotiplus, pingbineirong, zhanxianneirong, pingbineirongplus, pingbitime)) {
+                items.push(item);
+                // 保存到日志文件
+                saveIdToLog(item);
+                console.log(`新数据: ID ${item.id} - ${item.title}`);
+            } else {
+                console.log(`数据因屏蔽设置被忽略: ${item.title}【${item.catename}】`);
             }
-
-        })
-
+        } else {
+            console.log(`ID ${item.id} 已在文件中记录，跳过`);
+        }
+    });
         
         // 只看它标题推送设置 https://new.xianbao.fun/jiaocheng/3854614.html
         let zkt_gjc = '';
@@ -142,7 +212,7 @@ got(newUrl, {
             //定义推送格式：{标题}{内容}{Html内容}{Markdown内容}{链接}{分类名}{分类ID}{日期}{时间}{楼主}
             //xbk_zdm_function 值得买分类额外自定义参数：{类目}{价格}{商城}{品牌}{图片}
 
-            let text = "{标题}{内容}";
+            let text = "{标题}\n{分类名} - {楼主}\n{内容}";
             let desp = "{链接}";
 
             text=tuisong_replace(text,item);
@@ -226,7 +296,8 @@ got(newUrl, {
   louzhuregtime: null,
   url: 'http://new.ixbk.net/xiaodigu/5732780.html'
 }*/
-            console.log("发现到新数据：" + item.title + "【" + item.catename + "】" + item.content + item.url);
+            console.log("发现到新数据：" + "\n" + item.title + "\n" + "【" + item.catename + "】" + "\n" + item.louzhu + "\n" + item.content + "\n" + item.url);
+            //console.log(item.louzhu);
 
 
             //定义合并推送内容格式
