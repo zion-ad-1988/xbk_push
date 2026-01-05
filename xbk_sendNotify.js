@@ -1162,40 +1162,150 @@ function aibotkNotify(text, desp) {
   });
 }
 
+// 飞书通知队列和限制器
+const fsBotQueue = [];
+let isProcessing = false;
+const RATE_LIMIT = 5; // 每秒5次
+const RATE_WINDOW = 1000; // 1秒窗口
+let requestCount = 0;
+let lastResetTime = Date.now();
+
 function fsBotNotify(text, desp) {
   return new Promise((resolve) => {
-    const { FSKEY } = push_config;
-    if (FSKEY) {
-      const options = {
-        url: `https://open.feishu.cn/open-apis/bot/v2/hook/${FSKEY}`,
-        json: { msg_type: 'text', content: { text: `${text}\n\n${desp}` } },
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        timeout,
-      };
-      $.post(options, (err, resp, data) => {
-        try {
-          if (err) {
-            console.log('飞书发送通知调用API失败😞\n', err);
-          } else {
-            if (data.StatusCode === 0 || data.code === 0) {
-              console.log('飞书发送通知消息成功🎉\n');
-            } else {
-              console.log(`飞书发送通知消息异常 ${data.msg}\n`);
-            }
-          }
-        } catch (e) {
-          $.logErr(e, resp);
-        } finally {
-          resolve(data);
-        }
-      });
-    } else {
-      resolve();
-    }
+    // 将消息加入队列
+    fsBotQueue.push({ text, desp, resolve });
+
+    // 开始处理队列（如果尚未开始）
+    processQueue();
   });
 }
+
+// 处理队列的函数
+async function processQueue() {
+  if (isProcessing) return;
+  isProcessing = true;
+
+  while (fsBotQueue.length > 0) {
+    // 检查速率限制
+    const now = Date.now();
+    if (now - lastResetTime > RATE_WINDOW) {
+      requestCount = 0;
+      lastResetTime = now;
+    }
+
+    if (requestCount >= RATE_LIMIT) {
+      // 等待直到下一个窗口
+      const waitTime = RATE_WINDOW - (now - lastResetTime);
+      await new Promise(resolve => setTimeout(resolve, waitTime));
+      continue;
+    }
+
+    // 从队列中取出消息
+    const message = fsBotQueue.shift();
+    if (!message) break;
+
+    // 增加请求计数
+    requestCount++;
+
+    // 发送单条消息
+    await sendSingleMessage(message.text, message.desp)
+      .then(message.resolve)
+      .catch(err => {
+        console.error('发送失败:', err);
+        message.resolve(null);
+      });
+  }
+
+  isProcessing = false;
+}
+
+// 发送单条消息的内部函数
+function sendSingleMessage(text, desp) {
+  return new Promise((resolve) => {
+    const { FSKEY } = push_config;
+    if (!FSKEY) {
+      console.log('飞书机器人FSKEY未配置');
+      resolve();
+      return;
+    }
+
+    const options = {
+      url: `https://open.feishu.cn/open-apis/bot/v2/hook/${FSKEY}`,
+      json: { msg_type: 'text', content: { text: `${text}\n\n${desp}` } },
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      timeout: timeout || 5000, // 确保timeout有默认值
+    };
+
+    $.post(options, (err, resp, data) => {
+      try {
+        if (err) {
+          console.log('飞书发送通知调用API失败😞\n', err);
+          resolve(null);
+        } else {
+          if (data.StatusCode === 0 || data.code === 0) {
+            console.log('飞书发送通知消息成功🎉\n');
+            resolve(data);
+          } else {
+            console.log(`飞书发送通知消息异常 ${data.msg}\n`);
+            resolve(data);
+          }
+        }
+      } catch (e) {
+        console.log('处理响应时出错:', e);
+        resolve(null);
+      }
+    });
+  });
+}
+
+// 分开推送的辅助函数 - 用于长消息拆分
+function fsBotNotifySplit(text, desp, maxLength = 4000) {
+  // 飞书单条消息限制约4000字符，这里做拆分
+  const fullMessage = `${text}\n\n${desp}`;
+
+  if (fullMessage.length <= maxLength) {
+    // 不需要拆分，直接发送
+    return fsBotNotify(text, desp);
+  }
+
+  // 需要拆分消息
+  const chunks = [];
+  let remaining = fullMessage;
+
+  while (remaining.length > 0) {
+    let chunk = remaining.substring(0, maxLength);
+
+    // 如果不是最后一段，确保在换行或空格处截断，避免截断单词
+    if (remaining.length > maxLength) {
+      const lastNewline = chunk.lastIndexOf('\n');
+      const lastSpace = chunk.lastIndexOf(' ');
+      const breakPoint = Math.max(lastNewline, lastSpace);
+
+      if (breakPoint > maxLength * 0.8) { // 如果断点在合理位置
+        chunk = chunk.substring(0, breakPoint);
+      }
+    }
+
+    chunks.push(chunk);
+    remaining = remaining.substring(chunk.length);
+  }
+
+  // 为每个分段创建发送任务
+  const promises = chunks.map((chunk, index) => {
+    const chunkText = `${text} (第${index + 1}/${chunks.length}段)`;
+    return fsBotNotify(chunkText, chunk);
+  });
+
+  return Promise.all(promises);
+}
+
+// 导出函数（如果需要模块化）
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { fsBotNotify, fsBotNotifySplit };
+}
+
 
 async function smtpNotify(text, desp) {
   const { SMTP_EMAIL, SMTP_PASSWORD, SMTP_SERVICE, SMTP_NAME } = push_config;
